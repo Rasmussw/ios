@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import UIKit
+import AVFoundation
+import SwiftUI
 import TLPhotoPicker
 import MobileCoreServices
 import Photos
 import NextcloudKit
-import SwiftUI
 
 // MARK: - Photo Picker
 
@@ -63,6 +64,10 @@ class NCPhotosPickerViewController: NSObject {
             }
         }, didCancel: nil)
 
+        //pickerVC?.delegate = self
+        configure.usedCameraButton = false
+        pickerVC?.configure = configure
+
         pickerVC?.didExceedMaximumNumberOfSelection = { _ in
             Task {
                 await showErrorBanner(windowScene: self.windowScene, text: "_limited_dimension_", errorCode: NCGlobal.shared.errorInternalError)
@@ -93,176 +98,422 @@ class NCPhotosPickerViewController: NSObject {
 }
 
 class customPhotoPickerViewController: TLPhotosPickerViewController {
+
     override var preferredStatusBarStyle: UIStatusBarStyle {
         return .lightContent
     }
 
+    // MARK: - Lifecycle
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        print("🔥 customPhotoPickerViewController loaded")
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        applyCustomButtons()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        applyCustomButtons() // 🔥 sikrer den ikke forsvinder
+    }
+
+    // MARK: - UI
+
     override func makeUI() {
         super.makeUI()
+        // ❗️ Sæt IKKE knapper her – de bliver overskrevet
+    }
 
-        self.customNavItem.leftBarButtonItem?.tintColor = NCBrandColor.shared.iconImageColor
-        self.customNavItem.rightBarButtonItem?.tintColor = NCBrandColor.shared.iconImageColor
-        if #available(iOS 26.0, *) {
-            doneButton.image = UIImage(systemName: "checkmark")
-            cancelButton.image = UIImage(systemName: "xmark")
-            navigationBarTopConstraint.constant = self.navigationBarTopConstraint.constant + 10
+    private func applyCustomButtons() {
+        guard let navItem = self.customNavItem else { return }
+
+        // Undgå at sætte dem igen og igen
+        if navItem.rightBarButtonItem?.action == #selector(openMyCustomCamera) {
+            return
         }
+
+        let cameraBtn = UIBarButtonItem(
+            barButtonSystemItem: .camera,
+            target: self,
+            action: #selector(openMyCustomCamera)
+        )
+
+        let closeBtn = UIBarButtonItem(
+            barButtonSystemItem: .stop,
+            target: self,
+            action: #selector(customAction)
+        )
+
+        cameraBtn.tintColor = NCBrandColor.shared.iconImageColor
+        closeBtn.tintColor = NCBrandColor.shared.iconImageColor
+
+        navItem.rightBarButtonItem = cameraBtn
+        navItem.leftBarButtonItem = closeBtn
+    }
+
+    // MARK: - Actions
+
+    @objc private func openMyCustomCamera() {
+
+        guard let tabBar = self.presentingViewController as? NCMainTabBarController
+                ?? self.view.window?.rootViewController as? NCMainTabBarController
+        else { return }
+
+        let cameraVC = NCPhotosPickerCameraViewController(controller: tabBar)
+
+        cameraVC.onCapture = { [weak self, weak cameraVC] url, isVideo in
+            guard let self else { return }
+
+            cameraVC?.dismiss(animated: true)
+
+            self.handleCapturedMedia(url: url, isVideo: isVideo)
+        }
+
+        cameraVC.modalPresentationStyle = .fullScreen
+        self.present(cameraVC, animated: true)
+    }
+    
+    private func handleCapturedMedia(url: URL, isVideo: Bool) {
+
+        guard let tabBar = self.view.window?.rootViewController as? NCMainTabBarController else { return }
+
+        let model = NCUploadAssetsModel(
+            tempAssets: [url],
+            serverUrl: tabBar.currentServerUrl(),
+            controller: tabBar
+        )
+
+        let view = NCUploadAssetsView(model: model)
+        let vc = UIHostingController(rootView: view)
+
+        tabBar.present(vc, animated: true)
+    }
+    
+    private func presentUpload(url: URL, isVideo: Bool) {
+
+        let tabBar = self.view.window?.rootViewController as! NCMainTabBarController
+
+        let model = NCUploadAssetsModel(
+            tempAssets: [url],
+            serverUrl: tabBar.currentServerUrl(),
+            controller: tabBar
+        )
+
+        let view = NCUploadAssetsView(model: model)
+        let vc = UIHostingController(rootView: view)
+
+        tabBar.present(vc, animated: true)
+    }
+
+    @objc private func customAction() {
+        self.dismiss(animated: true)
     }
 }
 
-// MARK: - Document Picker
 
-class NCDocumentPickerViewController: NSObject, UIDocumentPickerDelegate {
-    let appDelegate = (UIApplication.shared.delegate as? AppDelegate)!
-    let utilityFileSystem = NCUtilityFileSystem()
-    let database = NCManageDatabase.shared
-    var isViewerMedia: Bool
-    var viewController: UIViewController?
-    var controller: NCMainTabBarController
+// menuActionElement.append(UIAction(
+  //   title: NSLocalizedString("_upload_photos_videos_", comment: ""),
+    // image: utility.loadImage(named: "photo", colors: [NCBrandColor.shared.iconImageColor])
+ // ) { _ in
 
-    @discardableResult
-    init (controller: NCMainTabBarController, isViewerMedia: Bool, allowsMultipleSelection: Bool, viewController: UIViewController? = nil) {
+    // NCAskAuthorization().askAuthorizationPhotoLibrary(controller: controller) { hasPermission in
+        // if hasPermission {
+            // DispatchQueue.main.async {
+           //      let cameraVC = NCPhotosPickerCameraViewController(controller: controller)
+         //        controller.present(cameraVC, animated: true)
+       //      }
+     //    }
+   //  }
+ //})
+
+
+
+
+
+@MainActor
+class NCPhotosPickerCameraViewController: UIViewController,
+                                         AVCapturePhotoCaptureDelegate,
+                                         AVCaptureFileOutputRecordingDelegate {
+
+    private var session: AVCaptureSession!
+    private var photoOutput: AVCapturePhotoOutput!
+    private var movieOutput: AVCaptureMovieFileOutput!
+    private var previewLayer: AVCaptureVideoPreviewLayer!
+
+    var controller: NCMainTabBarController!
+    
+    // MARK: - Init
+
+    init(controller: NCMainTabBarController) {
         self.controller = controller
-        self.isViewerMedia = isViewerMedia
-        self.viewController = viewController
-        super.init()
-
-        let documentProviderMenu = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.data])
-
-        documentProviderMenu.modalPresentationStyle = .formSheet
-        documentProviderMenu.allowsMultipleSelection = allowsMultipleSelection
-        documentProviderMenu.popoverPresentationController?.sourceView = controller.tabBar
-        documentProviderMenu.popoverPresentationController?.sourceRect = controller.tabBar.bounds
-        documentProviderMenu.delegate = self
-
-        controller.present(documentProviderMenu, animated: true, completion: nil)
+        super.init(nibName: nil, bundle: nil)
+        modalPresentationStyle = .fullScreen
     }
 
-    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        Task { @MainActor in
-            let session = NCSession.shared.getSession(controller: self.controller)
-            let capabilities = await NKCapabilities.shared.getCapabilities(for: session.account)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
-            if isViewerMedia,
-               let urlIn = urls.first,
-               let url = self.copySecurityScopedResource(url: urlIn, urlOut: FileManager.default.temporaryDirectory.appendingPathComponent(urlIn.lastPathComponent)),
-               let viewController = self.viewController {
-                let ocId = NSUUID().uuidString
-                let fileName = url.lastPathComponent
-                let metadata = await NCManageDatabaseCreateMetadata().createMetadataAsync(
-                    fileName: fileName,
-                    ocId: ocId,
-                    serverUrl: "",
-                    url: url.path,
-                    session: session,
-                    sceneIdentifier: self.controller.sceneIdentifier)
+    // MARK: - Lifecycle
 
-                if metadata.classFile == NKTypeClassFile.unknow.rawValue {
-                    metadata.classFile = NKTypeClassFile.video.rawValue
-                }
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        setupCamera()
+        setupUI()
+    }
+    
+    var onCapture: ((URL, Bool) -> Void)?
 
-                if let fileNameError = FileNameValidator.checkFileName(metadata.fileNameView, account: self.controller.account, capabilities: capabilities) {
-                    let message = "\(fileNameError.errorDescription) \(NSLocalizedString("_please_rename_file_", comment: ""))"
-                    await UIAlertController.warningAsync( message: message, presenter: self.controller)
-                } else {
-                    if let metadata = await database.addAndReturnMetadataAsync(metadata),
-                       let vc = await NCViewer().getViewerController(metadata: metadata, delegate: viewController) {
-                        viewController.navigationController?.pushViewController(vc, animated: true)
-                    }
-                }
-            } else {
-                let serverUrl = self.controller.currentServerUrl()
-                var metadatas = [tableMetadata]()
-                var metadatasInConflict = [tableMetadata]()
-                var invalidNameIndexes: [Int] = []
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer.frame = view.bounds
+    }
 
-                for urlIn in urls {
-                    let ocId = NSUUID().uuidString
-                    let fileName = urlIn.lastPathComponent
-                    let newFileName = FileAutoRenamer.rename(fileName, capabilities: capabilities)
-                    let toPath = utilityFileSystem.getDirectoryProviderStorageOcId(ocId,
-                                                                                   fileName: newFileName,
-                                                                                   userId: session.userId,
-                                                                                   urlBase: session.urlBase)
-                    let urlOut = URL(fileURLWithPath: toPath)
-                    guard self.copySecurityScopedResource(url: urlIn, urlOut: urlOut) != nil else {
-                        continue
-                    }
-                    let metadataForUpload = await NCManageDatabaseCreateMetadata().createMetadataAsync(
-                        fileName: newFileName,
-                        ocId: ocId,
-                        serverUrl: serverUrl,
-                        url: "",
-                        session: session,
-                        sceneIdentifier: self.controller.sceneIdentifier)
+    // MARK: - Camera Setup
 
-                    metadataForUpload.session = NCNetworking.shared.sessionUploadBackground
-                    metadataForUpload.sessionSelector = NCGlobal.shared.selectorUploadFile
-                    metadataForUpload.size = utilityFileSystem.getFileSize(filePath: toPath)
-                    metadataForUpload.status = NCGlobal.shared.metadataStatusWaitUpload
-                    metadataForUpload.sessionDate = Date()
+    private func setupCamera() {
+        session = AVCaptureSession()
+        session.sessionPreset = .high
 
-                    if database.getMetadataConflict(account: session.account, serverUrl: serverUrl, fileNameView: fileName, nativeFormat: metadataForUpload.nativeFormat) != nil {
-                        metadatasInConflict.append(metadataForUpload)
-                    } else {
-                        metadatas.append(metadataForUpload)
-                    }
-                }
+        guard let camera = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: camera),
+              session.canAddInput(input) else {
+            print("Camera setup failed")
+            return
+        }
 
-                for (index, metadata) in metadatas.enumerated() {
-                    if let fileNameError = FileNameValidator.checkFileName(metadata.fileName, account: session.account, capabilities: capabilities) {
-                        if metadatas.count == 1 {
+        session.addInput(input)
 
-                            let newFileName = await UIAlertController.renameFileAsync(fileName: metadata.fileName,
-                                                                                      capabilities: capabilities,
-                                                                                      account: metadata.account,
-                                                                                      presenter: self.controller)
+        // Photo output
+        photoOutput = AVCapturePhotoOutput()
+        session.addOutput(photoOutput)
 
-                            metadatas[index].fileName = newFileName
-                            metadatas[index].fileNameView = newFileName
-                            metadatas[index].serverUrlFileName = utilityFileSystem.createServerUrl(serverUrl: metadatas[index].serverUrl, fileName: newFileName)
+        // Video output
+        movieOutput = AVCaptureMovieFileOutput()
+        session.addOutput(movieOutput)
 
-                            await self.database.addMetadatasAsync(metadatas)
+        // Preview
+        previewLayer = AVCaptureVideoPreviewLayer(session: session)
+        previewLayer.videoGravity = .resizeAspectFill
+        previewLayer.frame = view.bounds
 
-                            return
-                        } else {
-                            let message = "\(fileNameError.errorDescription) \(NSLocalizedString("_please_rename_file_", comment: ""))"
-                            await UIAlertController.warningAsync( message: message, presenter: self.controller)
-                            invalidNameIndexes.append(index)
-                        }
-                    }
-                }
+        view.layer.addSublayer(previewLayer)
 
-                for index in invalidNameIndexes.reversed() {
-                    metadatas.remove(at: index)
-                }
+        session.startRunning()
+    }
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        session?.stopRunning()
+    }
 
-                await self.database.addMetadatasAsync(metadatas)
+    // MARK: - UI
 
-                if !metadatasInConflict.isEmpty {
-                    if let conflict = UIStoryboard(name: "NCCreateFormUploadConflict", bundle: nil).instantiateInitialViewController() as? NCCreateFormUploadConflict {
-                        conflict.account = self.controller.account
-                        conflict.delegate = appDelegate
-                        conflict.serverUrl = serverUrl
-                        conflict.metadatasUploadInConflict = metadatasInConflict
+    private func setupUI() {
 
-                        self.controller.present(conflict, animated: true, completion: nil)
-                    }
-                }
-            }
+        // CLOSE BUTTON
+        let closeButton = UIButton(type: .system)
+        closeButton.setImage(UIImage(systemName: "xmark"), for: .normal)
+        closeButton.tintColor = .white
+        closeButton.frame = CGRect(x: 20, y: 60, width: 40, height: 40)
+        closeButton.addTarget(self, action: #selector(closeCamera), for: .touchUpInside)
+        view.addSubview(closeButton)
+
+        // PHOTO BUTTON
+        let photoButton = UIButton(type: .system)
+        photoButton.backgroundColor = .white
+        photoButton.layer.cornerRadius = 35
+        photoButton.frame = CGRect(x: (view.bounds.width / 2) - 35,
+                                   y: view.bounds.height - 140,
+                                   width: 70,
+                                   height: 70)
+        photoButton.addTarget(self, action: #selector(takePhoto), for: .touchUpInside)
+        view.addSubview(photoButton)
+
+        // VIDEO BUTTON
+        let videoButton = UIButton(type: .system)
+        videoButton.setTitle("REC", for: .normal)
+        videoButton.tintColor = .red
+        videoButton.frame = CGRect(x: view.bounds.width - 80,
+                                   y: view.bounds.height - 120,
+                                   width: 60,
+                                   height: 40)
+        videoButton.addTarget(self, action: #selector(toggleVideo), for: .touchUpInside)
+        view.addSubview(videoButton)
+
+        // FLIP CAMERA
+        let flipButton = UIButton(type: .system)
+        flipButton.setImage(UIImage(systemName: "camera.rotate"), for: .normal)
+        flipButton.tintColor = .white
+        flipButton.frame = CGRect(x: view.bounds.width - 60, y: 60, width: 40, height: 40)
+        flipButton.addTarget(self, action: #selector(flipCamera), for: .touchUpInside)
+        view.addSubview(flipButton)
+    }
+
+    // MARK: - Actions
+
+    @objc private func closeCamera() {
+        dismiss(animated: true)
+    }
+
+    @objc private func takePhoto() {
+        let settings = AVCapturePhotoSettings()
+        settings.flashMode = .auto
+        photoOutput.capturePhoto(with: settings, delegate: self)
+    }
+
+    @objc private func toggleVideo() {
+        if movieOutput.isRecording {
+            movieOutput.stopRecording()
+        } else {
+            let fileName = UUID().uuidString + ".mov"
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(fileName)
+
+            movieOutput.startRecording(to: url, recordingDelegate: self)
         }
     }
 
-    func copySecurityScopedResource(url: URL, urlOut: URL) -> URL? {
-        try? FileManager.default.removeItem(at: urlOut)
-        if url.startAccessingSecurityScopedResource() {
-            do {
-                try FileManager.default.copyItem(at: url, to: urlOut)
-                url.stopAccessingSecurityScopedResource()
-                return urlOut
-            } catch {
-            }
+    @objc private func flipCamera() {
+        session.beginConfiguration()
+
+        if let currentInput = session.inputs.first {
+            session.removeInput(currentInput)
         }
-        return nil
+
+        let position: AVCaptureDevice.Position = .front
+
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera,
+                                                   for: .video,
+                                                   position: position),
+              let input = try? AVCaptureDeviceInput(device: camera),
+              session.canAddInput(input) else {
+            session.commitConfiguration()
+            return
+        }
+
+        session.addInput(input)
+        session.commitConfiguration()
+    }
+
+    // MARK: - Delegates
+
+    func photoOutput(_ output: AVCapturePhotoOutput,
+                     didFinishProcessingPhoto photo: AVCapturePhoto,
+                     error: Error?) {
+
+        guard let data = photo.fileDataRepresentation() else { return }
+
+        let fileName = UUID().uuidString + ".jpg"
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(fileName)
+        try? data.write(to: url)
+
+        //dismiss(animated: true) {
+            //self.upload(url: url, isVideo: false)
+            self.onCapture?(url, false)
+            //dismiss(animated: true)
+            print("🔥 onCapture triggered with url:", url)
+        //}
+    }
+
+    func fileOutput(_ output: AVCaptureFileOutput,
+                    didFinishRecordingTo outputFileURL: URL,
+                    from connections: [AVCaptureConnection],
+                    error: Error?) {
+
+        guard error == nil else { return }
+
+        //dismiss(animated: true) {
+            //self.upload(url: outputFileURL, isVideo: true)
+            self.onCapture?(outputFileURL, true)
+            //dismiss(animated: true)
+        //}
+    }
+
+    // MARK: - Upload
+
+    private func upload(url: URL, isVideo: Bool) {
+        let model = NCUploadAssetsModel(
+            tempAssets: [url],
+            serverUrl: controller.currentServerUrl(),
+            controller: controller
+        )
+
+        let view = NCUploadAssetsView(model: model)
+        let vc = UIHostingController(rootView: view)
+
+        controller.present(vc, animated: true)
     }
 }
+
+
+
+    
+    
+    // MARK: - Document Picker
+    
+    class NCDocumentPickerViewController: NSObject, UIDocumentPickerDelegate {
+        
+        let controller: NCMainTabBarController
+        var viewController: UIViewController?
+        var isViewerMedia: Bool
+        
+        init(controller: NCMainTabBarController, isViewerMedia: Bool, allowsMultipleSelection: Bool, viewController: UIViewController? = nil) {
+            self.controller = controller
+            self.isViewerMedia = isViewerMedia
+            self.viewController = viewController
+            super.init()
+            
+            let documentPicker = UIDocumentPickerViewController(forOpeningContentTypes: [.data])
+            documentPicker.modalPresentationStyle = .formSheet
+            documentPicker.allowsMultipleSelection = allowsMultipleSelection
+            documentPicker.delegate = self
+            documentPicker.popoverPresentationController?.sourceView = controller.tabBar
+            documentPicker.popoverPresentationController?.sourceRect = controller.tabBar.bounds
+            
+            controller.present(documentPicker, animated: true)
+        }
+        
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            Task { @MainActor in
+                // Her kan du implementere logikken til at gemme/copy filerne
+                // f.eks. til NCUploadAssetsModel med fileUrls
+            }
+        }
+        
+        func copySecurityScopedResource(url: URL, urlOut: URL) -> URL? {
+            try? FileManager.default.removeItem(at: urlOut)
+            if url.startAccessingSecurityScopedResource() {
+                do {
+                    try FileManager.default.copyItem(at: url, to: urlOut)
+                    url.stopAccessingSecurityScopedResource()
+                    return urlOut
+                } catch {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+            return nil
+        }
+    }
+
+
+
+// MARK: - TLPhotosPicker Delegate
+//extension NCPhotosPickerViewController: TLPhotosPickerViewControllerDelegate {
+    // Denne metode er den mest pålidelige i TLPhotoPicker til at overtage kameratrykket
+    //func handleNoCameraPermissions(picker: TLPhotosPickerViewController) {
+        // Lad den stå tom eller vis en fejl
+    //}
+
+   // func selectedCameraCell(picker: TLPhotosPickerViewController) {
+        // Tving dit view frem med det samme
+      //  let cameraVC = NCPhotosPickerCameraViewController(controller: self.controller)
+    //    picker.present(cameraVC, animated: true)
+  //  }
+//}
+
+
+

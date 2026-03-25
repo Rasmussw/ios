@@ -53,6 +53,24 @@ class NCContextMenuPlus: NSObject {
                 }
             }
         })
+        
+        
+       // menuActionElement.append(UIAction(
+         //   title: NSLocalizedString("_upload_photos_videos_", comment: ""),
+           // image: utility.loadImage(named: "photo", colors: [NCBrandColor.shared.iconImageColor])
+        // ) { _ in
+
+           // NCAskAuthorization().askAuthorizationPhotoLibrary(controller: controller) { hasPermission in
+               // if hasPermission {
+                   // DispatchQueue.main.async {
+                  //      let cameraVC = NCPhotosPickerCameraViewController(controller: controller)
+                //        controller.present(cameraVC, animated: true)
+              //      }
+            //    }
+          //  }
+        //})
+        
+        
 
         menuActionElement.append(UIAction(title: NSLocalizedString("_upload_file_", comment: ""),
                                           image: utility.loadImage(named: "doc", colors: [NCBrandColor.shared.iconImageColor])) { _ in

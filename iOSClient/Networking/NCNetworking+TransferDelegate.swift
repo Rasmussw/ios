@@ -130,19 +130,19 @@ extension NCNetworking: NCTransferDelegate {
 
                     do {
                         if metadata.isImage {
-                            let data = try Data(contentsOf: URL(fileURLWithPath: fileNamePath))
-                            PHPhotoLibrary.shared().performChanges({
-                                let assetRequest = PHAssetCreationRequest.forAsset()
-                                assetRequest.addResource(with: .photo, data: data, options: nil)
-                            }) { success, _ in
-                                if !success {
-                                    Task {
-                                        await showErrorBanner(windowScene: windowScene,
-                                                              text: "_file_not_saved_cameraroll_",
-                                                              errorCode: NCGlobal.shared.errorInternalError)
+                                let data = try Data(contentsOf: URL(fileURLWithPath: fileNamePath))
+                                PHPhotoLibrary.shared().performChanges({
+                                    let assetRequest = PHAssetCreationRequest.forAsset()
+                                    assetRequest.addResource(with: .photo, data: data, options: nil)
+                                }) { success, _ in
+                                    if !success {
+                                        Task {
+                                            await showErrorBanner(windowScene: windowScene,
+                                                                  text: "_file_not_saved_cameraroll_",
+                                                                  errorCode: NCGlobal.shared.errorInternalError)
+                                        }
                                     }
                                 }
-                            }
                         } else if metadata.isVideo {
                             PHPhotoLibrary.shared().performChanges({
                                 PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: URL(fileURLWithPath: fileNamePath))

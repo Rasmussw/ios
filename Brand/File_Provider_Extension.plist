@@ -28,10 +28,10 @@
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionAttributes</key>
-    		<dict>
-        		<key>NSFileProviderSupportsMultipleDomains</key>
-        		<true/>
-    		</dict>
+		<dict>
+			<key>NSFileProviderSupportsMultipleDomains</key>
+			<true/>
+		</dict>
 		<key>NSExtensionFileProviderDocumentGroup</key>
 		<string>group.it.twsweb.Crypto-Cloud</string>
 		<key>NSExtensionFileProviderSupportsEnumeration</key>
