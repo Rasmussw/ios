@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Nextcloud GmbH
 // SPDX-FileCopyrightText: 2023 Marino Faggiana
+// SPDX-FileCopyrightText: 2026 Rasmus Wøldike
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import SwiftUI
@@ -43,6 +44,9 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
         func createProcessUploads() {
             if !self.dismissView {
                 self.database.addMetadatas(metadatas)
+                if self.saveToCameraRoll && !self.tempAssets.isEmpty {
+                    self.saveTempAssetsToCameraRoll()
+                }
                 self.dismissView = true
             }
         }
@@ -64,6 +68,21 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
     }
     
 
+    private func saveTempAssetsToCameraRoll() {
+        for url in tempAssets {
+            let ext = url.pathExtension.lowercased()
+            if ["mov", "mp4", "m4v"].contains(ext) {
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: url)
+                }, completionHandler: nil)
+            } else if let data = try? Data(contentsOf: url) {
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
+                }, completionHandler: nil)
+            }
+        }
+    }
+
     // MARK: - Published
     @Published var serverUrl: String
     @Published var assets: [TLPHAsset] = []
@@ -75,6 +94,7 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
     @Published var showHUD = false
     @Published var uploadInProgress = false
     @Published var controller: NCMainTabBarController?
+    @Published var saveToCameraRoll: Bool = false
 
     // MARK: - Private
     var keychain = NCPreferences()
@@ -96,7 +116,6 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
     
     // MARK: - Initializers
     
-    // For Photo Library (TLPhotoPicker)
     init(assets: [TLPHAsset], serverUrl: String, controller: NCMainTabBarController?) {
         self.assets = assets
         self.serverUrl = serverUrl
@@ -137,6 +156,7 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
         self.tempAssets = tempAssets
         self.serverUrl = serverUrl
         self.controller = controller
+        self.saveToCameraRoll = NCPreferences().saveCameraMediaToCameraRoll
 
         self.useAutoUploadFolder = keychain.getUploadUseAutoUploadFolder(account: session.account)
         self.useAutoUploadSubFolder = keychain.getUploadUseAutoUploadSubFolder(account: session.account)
@@ -158,19 +178,6 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
         self.hiddenSave = false
     }
     
-    
-    func startAutoUploadIfNeeded() {
-        guard !tempAssets.isEmpty else { return }
-        guard !previewStore.isEmpty else { return }
-
-        if uploadInProgress { return }
-
-        uploadInProgress = true
-
-        save { _, _ in
-            self.dismissView = true
-        }
-    }
     
     // MARK: - Timer (QuickLook)
     func startTimer(navigationItem: UINavigationItem) {
@@ -197,6 +204,38 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
     }
 
     // MARK: - Helpers
+
+    func lowResolutionImage(asset: PHAsset) -> UIImage? {
+        let imageManager = PHImageManager.default()
+        let options = PHImageRequestOptions()
+        options.isSynchronous = true
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = true
+        let targetSize = CGSize(width: 80, height: 80)
+        var thumbnail: UIImage?
+        imageManager.requestImage(for: asset, targetSize: targetSize, contentMode: .aspectFill, options: options) { result, _ in
+            thumbnail = result
+        }
+        return thumbnail
+    }
+
+    func presentedQuickLook(index: Int, fileNamePath: String) -> Bool {
+        var image: UIImage?
+        if let imageData = previewStore[index].data {
+            image = UIImage(data: imageData)
+        } else if let imageFullResolution = previewStore[index].asset?.fullResolutionImage?.fixedOrientation() {
+            image = imageFullResolution
+        } else if let tempURL = previewStore[index].tempURL {
+            image = UIImage(contentsOfFile: tempURL.path)
+        }
+        if let image,
+           let data = image.jpegData(compressionQuality: 1) {
+            try? data.write(to: URL(fileURLWithPath: fileNamePath))
+            return true
+        }
+        return false
+    }
+
     func deleteAsset(index: Int) {
         guard index < previewStore.count else { return }
         previewStore.remove(at: index)
@@ -228,17 +267,35 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
 
             let autoUploadServerUrlBase = database.getAccountAutoUploadServerUrlBase(session: self.session)
             var serverUrl = useAutoUploadFolder ? autoUploadServerUrlBase : self.serverUrl
+            let isInDirectoryE2EE = NCUtilityFileSystem().isDirectoryE2EE(serverUrl: serverUrl, urlBase: session.urlBase, userId: session.userId, account: session.account)
 
-            // =========================
-            // ORIGINAL PHOTOS
-            // =========================
-            
             for tlAsset in assets {
 
                 guard let asset = tlAsset.phAsset,
                       let preview = previewStore.first(where: { $0.id == asset.localIdentifier }) else { continue }
 
-                let fileName = asset.originalFilename
+                let assetFileName = asset.originalFilename
+                let creationDate = asset.creationDate ?? Date()
+                let ext = (assetFileName as NSString).pathExtension.lowercased()
+                let fileName = preview.fileName.isEmpty
+                    ? utilityFileSystem.createFileName(assetFileName, fileDate: creationDate, fileType: asset.mediaType)
+                    : (preview.fileName + "." + ext)
+
+                let livePhoto = preview.assetType == .livePhoto
+                    && !isInDirectoryE2EE
+                    && NCPreferences().livePhoto
+                    && preview.data == nil
+
+                if useAutoUploadSubFolder {
+                    serverUrl = utilityFileSystem.createGranularityPath(asset: asset, serverUrlBase: autoUploadServerUrlBase)
+                }
+
+                let predicate = NSPredicate(format: "account == %@ AND serverUrl == %@ AND fileName == %@ AND session != ''",
+                                            session.account, serverUrl, fileName)
+                if let results = database.getMetadatas(predicate: predicate, sortedByKeyPath: "fileName", ascending: false),
+                   !results.isEmpty {
+                    continue
+                }
 
                 let metadata = await NCManageDatabaseCreateMetadata().createMetadataAsync(
                     fileName: fileName,
@@ -248,18 +305,52 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
                     sceneIdentifier: controller?.sceneIdentifier
                 )
 
+                if livePhoto {
+                    metadata.livePhotoFile = (metadata.fileName as NSString).deletingPathExtension + ".mov"
+                }
                 metadata.assetLocalIdentifier = asset.localIdentifier
                 metadata.session = NCNetworking.shared.sessionUploadBackground
                 metadata.sessionSelector = global.selectorUploadFile
                 metadata.status = global.metadataStatusWaitUpload
                 metadata.sessionDate = Date()
+                metadata.nativeFormat = preview.nativeFormat
 
-                metadatasNOConflict.append(metadata)
+                if let data = preview.data {
+                    if metadata.contentType == "image/heic" {
+                        let fileNameNoExtension = (fileName as NSString).deletingPathExtension
+                        metadata.contentType = "image/jpeg"
+                        metadata.fileName = fileNameNoExtension + ".jpg"
+                        metadata.fileNameView = fileNameNoExtension + ".jpg"
+                        metadata.nativeFormat = false
+                    }
+                    let fileNamePath = utilityFileSystem.getDirectoryProviderStorageOcId(
+                        metadata.ocId,
+                        fileName: metadata.fileNameView,
+                        userId: metadata.userId,
+                        urlBase: metadata.urlBase
+                    )
+                    do {
+                        try data.write(to: URL(fileURLWithPath: fileNamePath))
+                        metadata.isExtractFile = true
+                        metadata.size = utilityFileSystem.getFileSize(filePath: fileNamePath)
+                        metadata.creationDate = asset.creationDate as? NSDate ?? (Date() as NSDate)
+                        metadata.date = asset.modificationDate as? NSDate ?? (Date() as NSDate)
+                    } catch {}
+                }
+
+                if let result = database.getMetadataConflict(
+                    account: session.account,
+                    serverUrl: serverUrl,
+                    fileNameView: fileName,
+                    nativeFormat: metadata.nativeFormat
+                ) {
+                    metadata.fileName = result.fileName
+                    metadatasUploadInConflict.append(metadata)
+                } else {
+                    metadatasNOConflict.append(metadata)
+                }
             }
 
-            // =========================
-            // 2. CAMERA TEMP FILES
-            // =========================
             for item in previewStore where item.tempURL != nil {
 
                 guard let url = item.tempURL else { continue }
@@ -288,12 +379,10 @@ class NCUploadAssetsModel: ObservableObject, NCCreateFormUploadConflictDelegate 
                 do {
                     let destinationURL = URL(fileURLWithPath: toPath)
 
-                    // fjern eksisterende fil hvis den findes
                     if FileManager.default.fileExists(atPath: destinationURL.path) {
                         try FileManager.default.removeItem(at: destinationURL)
                     }
 
-                    // kopier fil
                     try FileManager.default.copyItem(at: url, to: destinationURL)
 
                     metadata.size = utilityFileSystem.getFileSize(filePath: toPath)
